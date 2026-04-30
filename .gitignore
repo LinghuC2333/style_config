@@ -1,0 +1,20 @@
+# secrets
+.env
+mcp/.env
+
+# old SQLite (replaced by Postgres)
+data/styles.db
+
+# wiki cache (unrelated to this project, came from the workspace)
+db/
+
+# uploads scratch dir
+public/uploads/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# os
+.DS_Store
