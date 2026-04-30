@@ -776,6 +776,48 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
 <div id="toast" class="toast"></div>
 
 <script>
+// ─── auth: magic-link bootstrap + authed fetch ───────────────────────
+// First visit URL = https://host/?k=<shared-token>. We pull that out of the
+// URL once, stash it in localStorage + a cookie (so direct page loads also
+// pass auth), then strip ?k from the URL so it doesn't sit in history.
+const TOKEN_KEY = 'style_config_token';
+(function bootstrapToken() {
+  const params = new URLSearchParams(window.location.search);
+  const k = params.get('k');
+  if (k) {
+    try { localStorage.setItem(TOKEN_KEY, k); } catch (_) { /* private mode */ }
+    document.cookie = TOKEN_KEY + '=' + encodeURIComponent(k)
+      + '; path=/; max-age=31536000; SameSite=Lax';
+    params.delete('k');
+    const qs = params.toString();
+    const newUrl = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+    window.history.replaceState(null, '', newUrl);
+  }
+})();
+function authToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+async function authedFetch(url, opts = {}) {
+  const t = authToken();
+  const headers = Object.assign({}, opts.headers || {});
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  const r = await fetch(url, Object.assign({}, opts, { headers }));
+  if (r.status === 401) {
+    showAuthError();
+    throw new Error('unauthorized');
+  }
+  return r;
+}
+function showAuthError() {
+  let banner = document.getElementById('authBanner');
+  if (banner) return;
+  banner = document.createElement('div');
+  banner.id = 'authBanner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#B3261E;color:#fff;padding:14px 20px;text-align:center;font-weight:600;z-index:1000;font-size:15px';
+  banner.textContent = '需要 token，请用分享链接打开（?k=… 那种）。';
+  document.body.appendChild(banner);
+}
+
 // ─── DOM refs ─────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 const tableEl = $('table');
@@ -967,7 +1009,7 @@ createForm.onsubmit = async (e) => {
 
   createSubmit.disabled = true; createSubmit.textContent = '上传中…';
   try {
-    const r = await fetch('/api/styles', { method: 'POST', body: fd });
+    const r = await authedFetch('/api/styles', { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok) {
       if (j.field_errors) Object.entries(j.field_errors).forEach(([k, v]) => setError(createForm, k, v));
@@ -1027,7 +1069,7 @@ editSubmit.onclick = async () => {
 
   editSubmit.disabled = true; editSubmit.textContent = '保存中…';
   try {
-    const r = await fetch('/api/styles/' + editingId, { method: 'PUT', body: fd });
+    const r = await authedFetch('/api/styles/' + editingId, { method: 'PUT', body: fd });
     const j = await r.json();
     if (!r.ok) {
       if (j.field_errors) Object.entries(j.field_errors).forEach(([k, v]) => setError(editForm, k, v));
@@ -1046,7 +1088,7 @@ editSubmit.onclick = async () => {
 // ─── delete ───────────────────────────────────────────────────────────
 async function deleteStyle(s) {
   if (!confirm(`删除风格「${s.name}」？（OSS 上的图不会删）`)) return;
-  await fetch('/api/styles/' + s.id, { method: 'DELETE' });
+  await authedFetch('/api/styles/' + s.id, { method: 'DELETE' });
   load();
 }
 
@@ -1064,7 +1106,7 @@ genSubmit.onclick = async () => {
   if (!text) { showToast('请输入外形描述'); return; }
   genSubmit.disabled = true; genSubmit.textContent = '生成中…(10-60s)';
   try {
-    const r = await fetch(`/api/styles/${genTargetId}/preview`, {
+    const r = await authedFetch(`/api/styles/${genTargetId}/preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ appearance: text }),
@@ -1083,7 +1125,7 @@ genSubmit.onclick = async () => {
 
 // ─── list / render ───────────────────────────────────────────────────
 async function load() {
-  const r = await fetch('/api/styles');
+  const r = await authedFetch('/api/styles');
   const items = await r.json();
   tableBody.innerHTML = '';
   if (items.length === 0) {

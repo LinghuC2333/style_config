@@ -26,6 +26,7 @@ Run:
 """
 from __future__ import annotations
 
+import hmac
 import io
 import json
 import mimetypes
@@ -243,6 +244,46 @@ VALID_MODELS = {
 }
 
 app = Flask(__name__, static_folder=None)
+
+
+# ─── auth ──────────────────────────────────────────────────────────────
+# Shared bearer token. Public friends get a "magic link" URL with `?k=<token>`;
+# the frontend stores it in localStorage and sends `Authorization: Bearer …`
+# on every API call afterwards. If STYLE_CONFIG_TOKEN isn't set, auth is OFF
+# (handy for local dev).
+
+def _expected_token() -> str:
+    return (sh.get_secret("STYLE_CONFIG_TOKEN") or "").strip()
+
+
+def _request_token() -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    k = (request.args.get("k") or "").strip()
+    if k:
+        return k
+    return (request.cookies.get("style_config_token") or "").strip()
+
+
+def _auth_ok() -> bool:
+    expected = _expected_token()
+    if not expected:
+        return True  # auth disabled
+    provided = _request_token()
+    return bool(provided) and hmac.compare_digest(provided, expected)
+
+
+@app.before_request
+def _require_auth():
+    # The index page itself must be reachable without auth so the magic-link
+    # bootstrap JS can run. /favicon.ico same. All /api/* needs auth.
+    p = request.path
+    if request.method == "GET" and p in ("/", "/favicon.ico"):
+        return None
+    if _auth_ok():
+        return None
+    return jsonify({"error": "unauthorized"}), 401
 
 
 @app.route("/")

@@ -34,6 +34,7 @@ SENSITIVE = frozenset({
     "ZENMUX_API_KEY",
     "SSH_PASSWORD",
     "PG_PASSWORD",
+    "STYLE_CONFIG_TOKEN",  # shared bearer token for the public deployment
 })
 
 
