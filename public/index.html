@@ -853,6 +853,13 @@ let genTargetId = null;
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+// OSS-side resize so the table doesn't fetch megabyte originals just to render
+// a 64x64 thumbnail. Only applies to aliyuncs URLs; passthrough otherwise.
+function thumbUrl(url, size = 128) {
+  if (!url || typeof url !== 'string' || !url.includes('.aliyuncs.com')) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}x-oss-process=image/resize,m_fill,w_${size},h_${size}/quality,Q_80`;
+}
 
 function showToast(msg, ms = 1800) {
   toast.textContent = msg;
@@ -1072,7 +1079,7 @@ async function openEdit(style) {
   syncSelectsEmpty(editForm);
   editIdEl.textContent = style.id;
   editCurrentRefs.innerHTML = (style.reference_urls || [])
-    .map(u => `<a href="#" data-url="${escapeHtml(u)}"><img src="${escapeHtml(u)}" alt=""></a>`).join('');
+    .map(u => `<a href="#" data-url="${escapeHtml(u)}"><img src="${escapeHtml(thumbUrl(u))}" alt="" loading="lazy"></a>`).join('');
   editCurrentRefs.querySelectorAll('a').forEach(a => {
     a.onclick = (e) => { e.preventDefault(); openLightbox(a.dataset.url); };
   });
@@ -1182,7 +1189,7 @@ function row(s) {
   const genCell = s.generated_preview_url
     ? `<div class="gen-cell">
          <span class="thumb-wrap">
-           <img class="thumb" src="${escapeHtml(s.generated_preview_url)}" alt="" data-zoom="${escapeHtml(s.generated_preview_url)}">
+           <img class="thumb" src="${escapeHtml(thumbUrl(s.generated_preview_url))}" alt="" loading="lazy" data-zoom="${escapeHtml(s.generated_preview_url)}">
            <div class="thumb-tooltip thumb-tooltip--right">
              <div class="thumb-tooltip__row">
                <span class="thumb-tooltip__url" title="${escapeHtml(s.generated_preview_url)}">preview: ${escapeHtml(s.generated_preview_url)}</span>
@@ -1256,7 +1263,7 @@ function renderRefPreview(urls) {
     </div>
   `;
   return `<span class="thumb-wrap">
-    <img class="thumb" src="${escapeHtml(first)}" alt="" data-zoom="${escapeHtml(first)}">
+    <img class="thumb" src="${escapeHtml(thumbUrl(first))}" alt="" loading="lazy" data-zoom="${escapeHtml(first)}">
     ${tooltip}
   </span>`;
 }
