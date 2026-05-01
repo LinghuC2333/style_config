@@ -256,6 +256,7 @@ button, input, select, textarea { font-family: var(--mono); }
   cursor: pointer;
 }
 .field--file .field__control:hover { background: color-mix(in srgb, var(--primary) 4%, transparent); }
+.field--file .field__control--dragover { background: color-mix(in srgb, var(--primary) 12%, transparent); border-color: var(--primary); }
 .field--file input[type=file] { display: none; }
 .field--file .file-list { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; color: var(--on-surface-mute); }
 .field--file .file-list:empty::before { content: '点击或拖拽，可选，最多 2 张'; color: var(--on-surface-mute); }
@@ -951,11 +952,44 @@ function clearAllErrors(formEl) {
 
 // ─── file picker UIs ─────────────────────────────────────────────────
 function bindFilePicker(input, listEl, store) {
-  input.addEventListener('change', () => {
+  function setFromList(fileList) {
     store.length = 0;
-    Array.from(input.files || []).slice(0, 2).forEach(f => store.push(f));
+    Array.from(fileList || [])
+      .filter(f => !f.type || f.type.startsWith('image/'))
+      .slice(0, 2)
+      .forEach(f => store.push(f));
     renderFileList(listEl, store);
+  }
+
+  input.addEventListener('change', () => {
+    setFromList(input.files);
     if (store.length === 0) input.value = '';
+  });
+
+  // drag & drop on the visible label
+  const dz = input.closest('.field--file')?.querySelector('.field__control');
+  if (!dz) return;
+  let counter = 0;  // dragenter/leave fires for child elements too — count nesting
+  dz.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    counter++;
+    dz.classList.add('field__control--dragover');
+  });
+  dz.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+  dz.addEventListener('dragleave', () => {
+    counter = Math.max(0, counter - 1);
+    if (counter === 0) dz.classList.remove('field__control--dragover');
+  });
+  dz.addEventListener('drop', (e) => {
+    e.preventDefault();
+    counter = 0;
+    dz.classList.remove('field__control--dragover');
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      setFromList(e.dataTransfer.files);
+    }
   });
 }
 function renderFileList(listEl, store) {
