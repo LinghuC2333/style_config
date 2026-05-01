@@ -215,12 +215,55 @@ CREATE INDEX IF NOT EXISTS styles_created_at_idx ON styles (created_at DESC);
 """
 
 
-def db_url() -> str:
-    return must("DATABASE_URL")
+# Optional remote-DB mode: if SSH_HOST is set in env, open an SSH tunnel to
+# the server's local Postgres and route every connection through it. Same
+# pattern as mcp/style_config_mcp.py — direct psycopg, just on a forwarded
+# local port. Without SSH_HOST, fall back to DATABASE_URL (typical local dev).
+
+_tunnel = None
+_tunneled_port: int | None = None
+
+
+def _ensure_tunnel() -> int | None:
+    """Lazily start the SSH tunnel. Returns the local port to connect to,
+    or None if remote mode is not configured."""
+    global _tunnel, _tunneled_port
+    ssh_host = ENV.get("SSH_HOST", "").strip()
+    if not ssh_host:
+        return None
+    if _tunnel is not None and _tunnel.is_active:
+        return _tunneled_port
+    from sshtunnel import SSHTunnelForwarder
+    remote_host = ENV.get("PG_REMOTE_HOST", "127.0.0.1")
+    remote_port = int(ENV.get("PG_REMOTE_PORT", "5432"))
+    _tunnel = SSHTunnelForwarder(
+        ssh_host,
+        ssh_username=must("SSH_USER"),
+        ssh_password=must("SSH_PASSWORD"),
+        remote_bind_address=(remote_host, remote_port),
+        local_bind_address=("127.0.0.1", 0),
+    )
+    _tunnel.start()
+    _tunneled_port = _tunnel.local_bind_port
+    print(f"[style_config] SSH tunnel → {ssh_host}:{remote_port} (local port {_tunneled_port})")
+    return _tunneled_port
 
 
 def db_connect() -> psycopg.Connection:
-    return psycopg.connect(db_url(), row_factory=dict_row)
+    port = _ensure_tunnel()
+    if port is not None:
+        # remote mode
+        return psycopg.connect(
+            host="127.0.0.1",
+            port=port,
+            dbname=must("PG_DB"),
+            user=must("PG_USER"),
+            password=must("PG_PASSWORD"),
+            row_factory=dict_row,
+            connect_timeout=10,
+        )
+    # local mode
+    return psycopg.connect(must("DATABASE_URL"), row_factory=dict_row)
 
 
 def db_init() -> None:
