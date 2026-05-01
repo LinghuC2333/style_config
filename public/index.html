@@ -258,7 +258,7 @@ button, input, select, textarea { font-family: var(--mono); }
 .field--file .field__control:hover { background: color-mix(in srgb, var(--primary) 4%, transparent); }
 .field--file input[type=file] { display: none; }
 .field--file .file-list { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; color: var(--on-surface-mute); }
-.field--file .file-list:empty::before { content: '点击或拖拽，至少 1 张，最多 2 张'; color: var(--on-surface-mute); }
+.field--file .file-list:empty::before { content: '点击或拖拽，可选，最多 2 张'; color: var(--on-surface-mute); }
 .file-chip {
   display: inline-flex; align-items: center; gap: 4px;
   height: 32px; padding: 0 4px 0 12px;
@@ -667,8 +667,8 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
           <span class="file-list" id="createFileList"></span>
         </label>
         <input id="createRefs" name="references" type="file" accept="image/*" multiple>
-        <label class="field__label">参考图<span class="required">*</span></label>
-        <span class="field__support" data-support>至少 1 张，最多 2 张。第一张作为主预览</span>
+        <label class="field__label">参考图</label>
+        <span class="field__support" data-support>可选，最多 2 张。第一张作为主预览</span>
       </div>
 
       <div class="dialog__actions">
@@ -1000,8 +1000,7 @@ createForm.onsubmit = async (e) => {
   if (!createForm.category.value) errs.category = '请选择类别';
   if (!createForm.model.value) errs.model = '请选择模型';
   if (!createForm.prompt.value.trim()) errs.prompt = '请输入风格提示词';
-  if (createPicked.length === 0) errs.references = '请至少上传 1 张参考图';
-  else if (createPicked.length > 2) errs.references = '最多 2 张参考图';
+  if (createPicked.length > 2) errs.references = '最多 2 张参考图';
   if (Object.keys(errs).length) {
     Object.entries(errs).forEach(([k, v]) => setError(createForm, k, v));
     return;

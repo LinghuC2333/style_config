@@ -321,9 +321,7 @@ def create_style():
         field_errors["model"] = "模型不合法"
     if not prompt:
         field_errors["prompt"] = "请输入风格提示词"
-    if len(files) == 0:
-        field_errors["references"] = "请至少上传 1 张参考图"
-    elif len(files) > 2:
+    if len(files) > 2:
         field_errors["references"] = "最多 2 张参考图"
     if field_errors:
         return jsonify({"field_errors": field_errors}), 400
