@@ -31,7 +31,8 @@ KEYRING_SERVICE = "style_config"
 SENSITIVE = frozenset({
     "OSS_ACCESS_KEY_ID",
     "OSS_ACCESS_KEY_SECRET",
-    "ZENMUX_API_KEY",
+    "ZENMUX_API_KEY",     # legacy image backend; kept as fallback
+    "MOB_AI_API_KEY",     # current image backend (image-* models)
     "SSH_PASSWORD",
     "PG_PASSWORD",
     "STYLE_CONFIG_TOKEN",  # shared bearer token for the public deployment
