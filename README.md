@@ -6,7 +6,7 @@
 比如「现代 YA 图像小说画风 + 这张参考图 + gpt-image-2」。
 存好之后做角色立绘、场景图就直接选风格、填外形，不用每次复制粘贴长 prompt。
 
-栈：Flask + Postgres + 阿里云 OSS（存图）+ Zenmux（调模型生成预览图）。
+栈：Flask + Postgres + 阿里云 OSS（存图）+ mob-ai（默认调模型）/ Zenmux（fallback）。
 单机用，前端是一个 HTML + 原生 JS。
 
 ## 跑起来
@@ -39,6 +39,7 @@ OSS_BUCKET=your-bucket
 OSS_ENDPOINT=https://oss-us-west-1.aliyuncs.com
 OSS_PREFIX=style-config
 
+MOB_AI_BASE_URL=https://ai.mob-ai.cn
 ZENMUX_VERTEX_BASE_URL=https://zenmux.ai/api/vertex-ai
 
 DATABASE_URL=postgresql:///style_config
@@ -56,23 +57,35 @@ PORT=5050
 
 ## 类别 / 模型枚举
 
-| 类别                              | 适用模型 |
-|-----------------------------------|---|
-| character series illustration     | openai/gpt-image-2 |
-| character ep illustration         | google/gemini-3.1-flash-image-preview |
-| scene series illustration         | google/gemini-3-pro-image-preview |
-| scene ep illustration             | （留空，用哪个都行） |
+前端下拉分两组：
 
-不是强制约束，前端只是下拉选项；想加新模型直接改 `server.py` 里的 `VALID_MODELS`。
+**mob-ai (默认)** — 走 `https://ai.mob-ai.cn/api/v1/generations`：
+
+| 模型 | 备注 |
+|---|---|
+| `image-gemini-pro` | 高质量、复杂构图，对应原 `google/gemini-3-pro-image-preview` |
+| `image-gemini-flash` | 快速预览，对应原 `google/gemini-3.1-flash-image-preview` |
+| `image-gpt` | 风格化插画，对应原 `openai/gpt-image-2` |
+
+**zenmux (备用)** — 走 google-genai SDK，仅当一条 style 显式选了旧名时启用：
+
+| 模型 | 备注 |
+|---|---|
+| `openai/gpt-image-2` | 老路径 |
+| `google/gemini-3.1-flash-image-preview` | 老路径 |
+| `google/gemini-3-pro-image-preview` | 老路径 |
+
+`server.py` 按 model 名前缀分发：`image-*` → mob-ai，其他 → zenmux。
+要回滚某条 style 到 zenmux，把它的 `model` 字段改回旧名即可，无需重启服务。
 
 ## 预览图是怎么来的
 
 1. 你在「生成」窗里写一段外形，比如 `18-year-old young woman, casual sweater + jeans`
 2. 后端把 prompt 里的 `{{appearance}}` 替换成这段（没 `{{appearance}}` 就贴在末尾）
-3. 按 model 分发：
-   - `openai/gpt-image-2` → `client.models.edit_image(prompt, reference_images=[...])`
-   - `google/gemini-*` → `client.models.generate_content(contents=[prompt, ref_part1, ref_part2])`
-4. 返回的 PNG 上传 OSS（`style-config/previews/<id>-<tag>.png`），URL 写回 DB
+3. 按 model 名前缀分发：
+   - `image-*` → mob-ai：`POST /api/v1/generations`，body 直接带参考图 URL（mob-ai 自己拉），返回的 JSON 里有图片 URL
+   - 其他（`openai/...` / `google/...`）→ zenmux：用 `google-genai` SDK，先把参考图下载成 bytes 再传给 SDK
+4. 拿到 PNG bytes 后上传我们自己的 OSS（`style-config/previews/<id>-<tag>.png`），URL 写回 DB
 
 预览图会持久化，以后打开还在；点「重生成」再写一段 appearance 就覆盖。
 
@@ -106,7 +119,7 @@ curl localhost:5050/api/styles
 curl -X POST localhost:5050/api/styles \
   -F name="YA 图像小说" \
   -F category="character series illustration" \
-  -F model="openai/gpt-image-2" \
+  -F model="image-gpt" \
   -F prompt='现代 YA 图像小说风格, ... {{appearance}}' \
   -F references=@/path/to/ref.png
 
@@ -160,9 +173,11 @@ Keychain 是系统级加密存储，跟你的登录密码绑定，即使 `.env` 
 ```
 OSS_ACCESS_KEY_ID
 OSS_ACCESS_KEY_SECRET
-ZENMUX_API_KEY
+ZENMUX_API_KEY      # 老 backend，fallback 路径还要用
+MOB_AI_API_KEY      # 当前 image backend
 SSH_PASSWORD
 PG_PASSWORD
+STYLE_CONFIG_TOKEN
 ```
 
 代码里 `must(key)` / `env(key)` 看到这些名字就只查 `os.environ` 和 Keychain，

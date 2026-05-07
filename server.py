@@ -153,9 +153,12 @@ def render_prompt(template: str, appearance: str) -> str:
     return template
 
 
-def generate_preview_bytes(model: str, prompt_text: str, ref_urls: list[str]) -> bytes:
-    """Invoke the chosen model with the rendered prompt + reference images.
-    Returns PNG bytes."""
+def _generate_via_zenmux(model: str, prompt_text: str, ref_urls: list[str]) -> bytes:
+    """Zenmux backend (google-genai SDK over Vertex-compatible endpoint).
+
+    Kept as the fallback path; selected when a style's `model` field uses the
+    legacy provider-prefixed names (`openai/...` or `google/...`). Requires
+    ZENMUX_API_KEY to be set. Returns PNG bytes."""
     from google.genai import types as gt
     client = genai_client()
 
@@ -194,6 +197,69 @@ def generate_preview_bytes(model: str, prompt_text: str, ref_urls: list[str]) ->
             if getattr(part, "inline_data", None) and part.inline_data.data:
                 return part.inline_data.data
     raise RuntimeError("model returned no image part")
+
+
+def _generate_via_mob_ai(model: str, prompt_text: str, ref_urls: list[str]) -> bytes:
+    """mob-ai backend (direct HTTP POST to /api/v1/generations).
+
+    Recommended path. The API takes reference image URLs directly (no need to
+    download them first) and returns a JSON envelope pointing at the generated
+    image URL on its OSS bucket. We then fetch those bytes so the caller can
+    upload them to our own OSS, matching the zenmux path's contract."""
+    import urllib.request
+    api_key = must("MOB_AI_API_KEY")
+    base = ENV.get("MOB_AI_BASE_URL", "https://ai.mob-ai.cn").rstrip("/")
+
+    body = {
+        "model": model,
+        "input": {
+            "prompt": prompt_text,
+            "references": [{"type": "image", "url": u} for u in ref_urls],
+        },
+    }
+    req = urllib.request.Request(
+        f"{base}/api/v1/generations",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    # mob-ai generation can take 60-120s (image-gpt observed at 67s with no
+    # references; with refs; complex prompts can stretch further). 1200s = 20min gives
+    # head-room for the worst case; we still depend on gunicorn `--timeout` being at
+    # least this large or the worker gets killed first.
+    with urllib.request.urlopen(req, timeout=1200) as resp:
+        data = json.loads(resp.read())
+
+    status = data.get("status")
+    if status and status != "succeeded":
+        raise RuntimeError(f"mob-ai generation failed: {data}")
+
+    # The API returns the image URL in three equivalent fields; prefer the
+    # most explicit one and fall back through the others.
+    image_url = (
+        (data.get("output") or {}).get("url")
+        or data.get("result")
+        or (data.get("images") or [{}])[0].get("url")
+    )
+    if not image_url:
+        raise RuntimeError(f"mob-ai response missing image url: {data}")
+
+    img_bytes, _mime = fetch_url_bytes(image_url)
+    return img_bytes
+
+
+def generate_preview_bytes(model: str, prompt_text: str, ref_urls: list[str]) -> bytes:
+    """Dispatch to the right image backend based on the model name.
+
+    Models whose name starts with `image-` go to mob-ai (the recommended
+    backend). Anything else (legacy `openai/...` or `google/...` names) falls
+    through to zenmux. Returns PNG bytes."""
+    if model.startswith("image-"):
+        return _generate_via_mob_ai(model, prompt_text, ref_urls)
+    return _generate_via_zenmux(model, prompt_text, ref_urls)
 
 
 # ─── DB ────────────────────────────────────────────────────────────────
