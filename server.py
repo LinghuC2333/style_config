@@ -21,7 +21,7 @@ Routes:
   POST   /api/styles/<id>/preview       — generate preview (json: {appearance})
 
 Run:
-  pip install flask oss2 'psycopg[binary]' google-genai
+  pip install flask oss2 'psycopg[binary]' keyring
   python3 server.py
 """
 from __future__ import annotations
@@ -143,7 +143,7 @@ def upload_to_oss(oss_key: str, data: bytes, mime: str) -> str:
 # bucket — so we store that URL directly, no byte round-trip.
 
 MODEL_MAP = {
-    # legacy Zenmux names → router model ids
+    # legacy model names → router model ids
     "openai/gpt-image-2": "image-gpt",
     "google/gemini-3.1-flash-image-preview": "image-gemini-flash",
     "google/gemini-3-pro-image-preview": "image-gemini-pro",
