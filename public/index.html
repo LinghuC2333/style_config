@@ -260,6 +260,7 @@ button, input, select, textarea { font-family: var(--mono); }
 .field--file input[type=file] { display: none; }
 .field--file .file-list { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; color: var(--on-surface-mute); }
 .field--file .file-list:empty::before { content: '点击或拖拽，可选，最多 2 张'; color: var(--on-surface-mute); }
+.field--file .file-list--gen:empty::before { content: '点击或拖拽，可不传，不限数量，按添加顺序喂给模型'; }
 .file-chip {
   display: inline-flex; align-items: center; gap: 4px;
   height: 32px; padding: 0 4px 0 12px;
@@ -659,7 +660,7 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
       <div class="field field--textarea" data-field="prompt">
         <textarea class="field__control" name="prompt" placeholder=" " rows="4"></textarea>
         <label class="field__label">风格提示词<span class="required">*</span></label>
-        <span class="field__support" data-support>用 <code>{{appearance}}</code> 占位角色 / 场景外形</span>
+        <span class="field__support" data-support>用 <code>{{变量名}}</code> 占位（如 {{appearance}}），生成时填值</span>
       </div>
 
       <div class="field field--file" data-field="references">
@@ -724,7 +725,7 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
       <div class="field field--textarea" data-field="prompt">
         <textarea class="field__control" name="prompt" placeholder=" " rows="6"></textarea>
         <label class="field__label">风格提示词<span class="required">*</span></label>
-        <span class="field__support" data-support>用 <code>{{appearance}}</code> 占位</span>
+        <span class="field__support" data-support>用 <code>{{变量名}}</code> 占位（如 {{appearance}}）</span>
       </div>
 
       <div class="drawer__section-label">当前参考图</div>
@@ -752,13 +753,39 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
   <div class="dialog">
     <h2 id="genTitle" class="dialog__title">生成预览图</h2>
     <p style="margin: 0 0 12px; font-size: 12px; color: var(--on-surface-mute);">
-      输入用来替换 <code>{{appearance}}</code> 的文本，预览这条风格用在该外形描述上的效果。
+      输入用来替换 prompt 里 <code>{{变量}}</code> 的文本（如 <code>{{appearance}}</code>），可再上传参考图，预览这条风格的效果。
     </p>
     <div class="field field--textarea" data-field="appearance">
       <textarea id="genAppearance" class="field__control" placeholder=" " rows="4"></textarea>
-      <label class="field__label">外形描述<span class="required">*</span></label>
+      <label class="field__label">替换文本<span class="required">*</span></label>
       <span class="field__support" data-support>例：18-year-old young woman, casual sweater + jeans</span>
     </div>
+
+    <div class="field field--select" data-field="aspect">
+      <select id="genAspect" class="field__control" data-empty="false">
+        <option value="1:1">1:1（正方形）</option>
+        <option value="9:16">9:16（竖版）</option>
+        <option value="16:9">16:9（横版）</option>
+        <option value="2:3">2:3</option>
+        <option value="3:2">3:2</option>
+        <option value="3:4">3:4</option>
+        <option value="4:3">4:3</option>
+        <option value="21:9">21:9</option>
+      </select>
+      <label class="field__label">输出比例</label>
+      <span class="field__support" data-support>仅 image-gpt 生效，gemini 会忽略</span>
+    </div>
+
+    <div class="field field--file" data-field="references">
+      <label class="field__control" for="genRefs">
+        <span class="material-symbols-rounded" aria-hidden="true">upload_file</span>
+        <span class="file-list file-list--gen" id="genFileList"></span>
+      </label>
+      <input id="genRefs" name="references" type="file" accept="image/*" multiple>
+      <label class="field__label">参考图（可选）</label>
+      <span class="field__support" data-support>不限数量，接在风格已有参考图之后；按添加顺序排列</span>
+    </div>
+
     <div class="dialog__actions">
       <button type="button" class="btn btn--text" data-close="genScrim">取消</button>
       <button type="button" class="btn btn--filled" id="genSubmit">生成</button>
@@ -839,6 +866,9 @@ const editCurrentRefs = $('editCurrentRefs');
 const editIdEl = $('editId');
 const genScrim = $('genScrim');
 const genAppearance = $('genAppearance');
+const genAspect = $('genAspect');
+const genRefs = $('genRefs');
+const genFileList = $('genFileList');
 const genSubmit = $('genSubmit');
 const lightbox = $('lightbox');
 const lightboxImg = $('lightboxImg');
@@ -846,6 +876,7 @@ const toast = $('toast');
 
 let createPicked = [];
 let editPicked = [];
+let genPicked = [];
 let editingId = null;
 let genTargetId = null;
 
@@ -958,19 +989,22 @@ function clearAllErrors(formEl) {
 });
 
 // ─── file picker UIs ─────────────────────────────────────────────────
-function bindFilePicker(input, listEl, store) {
+function bindFilePicker(input, listEl, store, opts = {}) {
+  const cap = opts.cap ?? 2;          // max files kept; Infinity = unlimited
+  const append = opts.append ?? false; // true = accumulate across picks (preserve order)
   function setFromList(fileList) {
-    store.length = 0;
-    Array.from(fileList || [])
-      .filter(f => !f.type || f.type.startsWith('image/'))
-      .slice(0, 2)
-      .forEach(f => store.push(f));
+    const incoming = Array.from(fileList || []).filter(f => !f.type || f.type.startsWith('image/'));
+    if (!append) store.length = 0;
+    for (const f of incoming) {
+      if (store.length >= cap) break;
+      store.push(f);
+    }
     renderFileList(listEl, store);
   }
 
   input.addEventListener('change', () => {
     setFromList(input.files);
-    if (store.length === 0) input.value = '';
+    input.value = '';  // reset so re-picking the same file (or adding more) re-fires change
   });
 
   // drag & drop on the visible label
@@ -1015,6 +1049,7 @@ function renderFileList(listEl, store) {
 }
 bindFilePicker(createRefs, createFileList, createPicked);
 bindFilePicker(editRefs, editFileList, editPicked);
+bindFilePicker(genRefs, genFileList, genPicked, { cap: Infinity, append: true });
 
 // ─── new style ────────────────────────────────────────────────────────
 $('newBtn').onclick = () => {
@@ -1136,6 +1171,9 @@ async function deleteStyle(s) {
 function openGen(style) {
   genTargetId = style.id;
   genAppearance.value = style.generated_preview_appearance || '';
+  genAspect.value = style.generated_preview_aspect || '1:1';
+  genPicked.length = 0;
+  renderFileList(genFileList, genPicked);
   clearAllErrors(genScrim);  // genScrim isn't a form, but harmless
   openScrim('genScrim');
   setTimeout(() => genAppearance.focus(), 50);
@@ -1143,13 +1181,16 @@ function openGen(style) {
 genSubmit.onclick = async () => {
   if (!genTargetId) return;
   const text = genAppearance.value.trim();
-  if (!text) { showToast('请输入外形描述'); return; }
-  genSubmit.disabled = true; genSubmit.textContent = '生成中…(10-60s)';
+  if (!text) { showToast('请输入替换文本'); return; }
+  genSubmit.disabled = true; genSubmit.textContent = '生成中…(可能 1-2 分钟)';
   try {
+    const fd = new FormData();
+    fd.append('appearance', text);
+    fd.append('aspectRatio', genAspect.value || '');
+    genPicked.forEach(f => fd.append('references', f));  // order preserved
     const r = await authedFetch(`/api/styles/${genTargetId}/preview`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appearance: text }),
+      body: fd,
     });
     const j = await r.json();
     if (!r.ok) { showToast(j.error || ('HTTP ' + r.status), 4000); return; }
@@ -1186,6 +1227,14 @@ function row(s) {
     ? renderRefPreview(refs)
     : `<span class="thumb thumb--placeholder"><span class="material-symbols-rounded">image</span></span>`;
 
+  const genRefUrls = s.generated_preview_ref_urls || [];
+  const genRefRows = genRefUrls.map((u, i) => `
+             <div class="thumb-tooltip__row">
+               <span class="thumb-tooltip__url" title="${escapeHtml(u)}">gen_ref${i + 1}: ${escapeHtml(u)}</span>
+               <button type="button" data-copy="${escapeHtml(u)}" aria-label="复制 URL">
+                 <span class="material-symbols-rounded">content_copy</span>
+               </button>
+             </div>`).join('');
   const genCell = s.generated_preview_url
     ? `<div class="gen-cell">
          <span class="thumb-wrap">
@@ -1198,6 +1247,8 @@ function row(s) {
                </button>
              </div>
              ${s.generated_preview_appearance ? `<div class="thumb-tooltip__row" style="color:var(--on-surface-mute)">appearance: ${escapeHtml(s.generated_preview_appearance)}</div>` : ''}
+             ${s.generated_preview_aspect ? `<div class="thumb-tooltip__row" style="color:var(--on-surface-mute)">ratio: ${escapeHtml(s.generated_preview_aspect)}</div>` : ''}
+             ${genRefRows}
            </div>
          </span>
          <button class="btn btn--text btn--small" data-action="gen">重生成</button>

@@ -29,9 +29,9 @@ from __future__ import annotations
 import hmac
 import io
 import json
-import mimetypes
 import os
 import pathlib
+import re
 import sys
 import time
 import uuid
@@ -79,6 +79,28 @@ def must(key: str) -> str:
     return v
 
 
+# ─── retry helper ──────────────────────────────────────────────────────
+# OSS (us-west-1) and the model API are reached over the user's proxy; that
+# link is flaky for big uploads and long image-gen calls (write timeouts,
+# connection resets). Retry transient failures with exponential backoff.
+
+def _retry(fn, *, tries: int = 3, base_delay: float = 1.5, what: str = "op"):
+    """Run fn(); on any exception retry with exponential backoff, re-raising the
+    last error after `tries` attempts."""
+    last = None
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if attempt < tries:
+                delay = base_delay * (2 ** (attempt - 1))
+                print(f"[style_config] {what} 第 {attempt}/{tries} 次失败: {e}；{delay:.1f}s 后重试",
+                      file=sys.stderr)
+                time.sleep(delay)
+    raise last
+
+
 # ─── OSS lazy client ───────────────────────────────────────────────────
 
 _oss_bucket = None
@@ -92,6 +114,7 @@ def oss_bucket():
             oss2.Auth(must("OSS_ACCESS_KEY_ID"), must("OSS_ACCESS_KEY_SECRET")),
             must("OSS_ENDPOINT"),
             must("OSS_BUCKET"),
+            connect_timeout=120,  # slow link via proxy — give big uploads room
         )
     return _oss_bucket
 
@@ -103,97 +126,110 @@ def public_url(oss_key: str) -> str:
 
 
 def upload_to_oss(oss_key: str, data: bytes, mime: str) -> str:
-    oss_bucket().put_object(
-        oss_key,
-        data,
-        headers={"x-oss-object-acl": "public-read", "Content-Type": mime},
+    _retry(
+        lambda: oss_bucket().put_object(
+            oss_key,
+            data,
+            headers={"x-oss-object-acl": "public-read", "Content-Type": mime},
+        ),
+        what=f"OSS 上传 {oss_key}",
     )
     return public_url(oss_key)
 
 
-# ─── Zenmux / google-genai lazy client ─────────────────────────────────
+# ─── Mob AI router (image generation) ──────────────────────────────────
+# Generation goes through the Mob AI router. Reference images are passed by
+# URL, and the generated image is returned as a URL already hosted on our OSS
+# bucket — so we store that URL directly, no byte round-trip.
 
-_genai_client = None
-
-
-def genai_client():
-    global _genai_client
-    if _genai_client is None:
-        from google import genai
-        from google.genai import types as gt
-        _genai_client = genai.Client(
-            api_key=must("ZENMUX_API_KEY"),
-            vertexai=True,
-            http_options=gt.HttpOptions(
-                api_version="v1",
-                base_url=ENV.get("ZENMUX_VERTEX_BASE_URL", "https://zenmux.ai/api/vertex-ai"),
-            ),
-        )
-    return _genai_client
+MODEL_MAP = {
+    # legacy Zenmux names → router model ids
+    "openai/gpt-image-2": "image-gpt",
+    "google/gemini-3.1-flash-image-preview": "image-gemini-flash",
+    "google/gemini-3-pro-image-preview": "image-gemini-pro",
+    # router-native names pass straight through
+    "image-gpt": "image-gpt",
+    "image-gemini-pro": "image-gemini-pro",
+    "image-gemini-flash": "image-gemini-flash",
+}
 
 
-def fetch_url_bytes(url: str) -> tuple[bytes, str]:
-    """Download a URL, return (bytes, mime). Used to pull reference images
-    back from OSS to feed into the generation API."""
+def _router_post(path: str, body: dict, timeout: int = 240) -> dict:
+    """POST JSON to the Mob AI router with auth + retry. On HTTP errors, raise
+    with the response body so the caller can surface the actual reason."""
+    import urllib.error
     import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": "style-config/1.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = resp.read()
-        mime = resp.headers.get("Content-Type") or mimetypes.guess_type(url)[0] or "image/png"
-    return data, mime
+    base = ENV.get("MOB_AI_BASE_URL", "https://ai.mob-ai.cn/api").rstrip("/")
+    key = must("MOB_AI_KEY")
+    payload = json.dumps(body).encode()
+
+    def _do() -> dict:
+        req = urllib.request.Request(
+            f"{base}{path}", data=payload, method="POST",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "User-Agent": "style-config/1.0",  # default urllib UA gets WAF-403'd
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as he:
+            detail = he.read().decode(errors="replace")[:400]
+            raise RuntimeError(f"HTTP {he.code}: {detail}") from None
+
+    return _retry(_do, tries=2, base_delay=2.0, what=f"router {path}")
 
 
-def render_prompt(template: str, appearance: str) -> str:
-    """Replace {{appearance}}; if the placeholder isn't present, append."""
-    appearance = (appearance or "").strip()
-    if "{{appearance}}" in template:
-        return template.replace("{{appearance}}", appearance)
-    if appearance:
-        return f"{template.rstrip()}\n\n{appearance}"
+def _extract_image_url(j: dict) -> str:
+    out = j.get("output") or {}
+    if isinstance(out, dict) and out.get("url"):
+        return out["url"]
+    imgs = j.get("images") or []
+    if imgs and isinstance(imgs[0], dict) and imgs[0].get("url"):
+        return imgs[0]["url"]
+    if isinstance(j.get("result"), str) and j["result"].startswith("http"):
+        return j["result"]
+    raise RuntimeError(f"router 未返回图片 url: {json.dumps(j)[:300]}")
+
+
+_PLACEHOLDER_RE = re.compile(r"\{\{[^{}]+\}\}")
+
+
+def render_prompt(template: str, text: str) -> str:
+    """Replace every {{var}} placeholder (any name) with `text`. If the
+    template has no placeholder, append `text` at the end. A prompt is expected
+    to carry a single variable, but if several appear they all get `text`."""
+    text = (text or "").strip()
+    if _PLACEHOLDER_RE.search(template):
+        # function replacement so backslashes / \g in user text aren't treated
+        # as regex group references
+        return _PLACEHOLDER_RE.sub(lambda _: text, template)
+    if text:
+        return f"{template.rstrip()}\n\n{text}"
     return template
 
 
-def generate_preview_bytes(model: str, prompt_text: str, ref_urls: list[str]) -> bytes:
-    """Invoke the chosen model with the rendered prompt + reference images.
-    Returns PNG bytes."""
-    from google.genai import types as gt
-    client = genai_client()
-
-    refs_data = [fetch_url_bytes(u) for u in ref_urls]
-
-    if model == "openai/gpt-image-2":
-        ref_objs = []
-        for i, (data, mime) in enumerate(refs_data, start=1):
-            ref_objs.append(gt.RawReferenceImage(
-                reference_id=i,
-                reference_image=gt.Image(image_bytes=data, mime_type=mime),
-            ))
-        if ref_objs:
-            resp = client.models.edit_image(
-                model=model,
-                prompt=prompt_text,
-                reference_images=ref_objs,
-            )
-        else:
-            resp = client.models.generate_images(model=model, prompt=prompt_text)
-        img = resp.generated_images[0].image
-        return getattr(img, "image_bytes", None) or img._image_bytes  # noqa: SLF001
-
-    # Gemini family — use generate_content with image + text parts.
-    parts: list[Any] = [gt.Part.from_text(text=prompt_text)]
-    for data, mime in refs_data:
-        parts.append(gt.Part.from_bytes(data=data, mime_type=mime))
-
-    resp = client.models.generate_content(
-        model=model,
-        contents=parts,
-        config=gt.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]),
-    )
-    for cand in resp.candidates or []:
-        for part in (cand.content.parts if cand.content else []) or []:
-            if getattr(part, "inline_data", None) and part.inline_data.data:
-                return part.inline_data.data
-    raise RuntimeError("model returned no image part")
+def generate_preview_url(model: str, prompt_text: str, ref_urls: list[str],
+                         aspect_ratio: str = "") -> str:
+    """Generate an image via the Mob AI router and return its URL. Reference
+    images are passed by URL; the result is hosted on OSS by the router, so the
+    URL can be stored directly. aspect_ratio (e.g. "9:16") maps to the router's
+    `input.aspectRatio` — only image-gpt honors it; other models ignore it."""
+    body: dict[str, Any] = {
+        "model": MODEL_MAP.get(model, model),
+        "input": {"prompt": prompt_text},
+    }
+    if ref_urls:
+        body["input"]["references"] = [{"type": "image", "url": u} for u in ref_urls]
+    if aspect_ratio:
+        body["input"]["aspectRatio"] = aspect_ratio
+    resp = _router_post("/v1/generations", body)
+    status = resp.get("status")
+    if isinstance(status, str) and status not in ("succeeded", "success"):
+        raise RuntimeError(f"router status={status}: {json.dumps(resp)[:300]}")
+    return _extract_image_url(resp)
 
 
 # ─── DB ────────────────────────────────────────────────────────────────
@@ -208,6 +244,8 @@ CREATE TABLE IF NOT EXISTS styles (
   reference_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
   generated_preview_url TEXT,
   generated_preview_appearance TEXT,
+  generated_preview_ref_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
+  generated_preview_aspect TEXT,
   created_at DOUBLE PRECISION NOT NULL,
   updated_at DOUBLE PRECISION NOT NULL
 );
@@ -269,6 +307,14 @@ def db_connect() -> psycopg.Connection:
 def db_init() -> None:
     with db_connect() as conn, conn.cursor() as cur:
         cur.execute(DDL)
+        # migrate existing tables that predate the per-preview ref column
+        cur.execute(
+            "ALTER TABLE styles ADD COLUMN IF NOT EXISTS "
+            "generated_preview_ref_urls JSONB NOT NULL DEFAULT '[]'::jsonb"
+        )
+        cur.execute(
+            "ALTER TABLE styles ADD COLUMN IF NOT EXISTS generated_preview_aspect TEXT"
+        )
         conn.commit()
 
 
@@ -462,10 +508,19 @@ def delete_style(style_id: str):
 
 @app.route("/api/styles/<style_id>/preview", methods=["POST"])
 def generate_preview(style_id: str):
-    body = request.get_json(silent=True) or {}
-    appearance = (body.get("appearance") or "").strip()
+    """Generate a preview. Accepts multipart (appearance text + any number of
+    ordered `references` files) or a JSON body {appearance}. Uploaded refs are
+    appended *after* the style's stored refs when calling the model, and their
+    OSS URLs are saved on the row so they can be inspected later."""
+    appearance = (request.form.get("appearance") or "").strip()
+    if not appearance:
+        body = request.get_json(silent=True) or {}
+        appearance = (body.get("appearance") or "").strip()
     if not appearance:
         return jsonify({"error": "appearance 不能为空"}), 400
+
+    # Optional output aspect ratio (e.g. "9:16"); image-gpt only.
+    aspect = (request.form.get("aspectRatio") or "").strip()
 
     with db_connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM styles WHERE id=%s", (style_id,))
@@ -473,26 +528,40 @@ def generate_preview(style_id: str):
     if not s:
         return jsonify({"error": "not found"}), 404
 
+    prefix = ENV.get("OSS_PREFIX", "style-config").rstrip("/")
+
+    # Per-preview reference uploads — unlimited, kept in the order the client
+    # sent them (request.files.getlist preserves multipart field order).
+    files = [f for f in request.files.getlist("references") if f and f.filename]
+    uploaded_urls: list[str] = []
+    try:
+        for i, fileobj in enumerate(files, start=1):
+            data = fileobj.read()
+            tag = uuid.uuid4().hex[:4]
+            oss_key = f"{prefix}/preview-refs/{style_id}-{tag}-{i}.png"
+            uploaded_urls.append(upload_to_oss(oss_key, data, fileobj.mimetype or "image/png"))
+    except Exception as e:
+        return jsonify({"error": f"参考图上传 OSS 失败: {e}"}), 502
+
+    # stored refs first, freshly-uploaded ones after
+    gen_refs = list(s["reference_urls"] or []) + uploaded_urls
+
     rendered = render_prompt(s["prompt"], appearance)
     try:
-        png = generate_preview_bytes(s["model"], rendered, list(s["reference_urls"] or []))
+        url = generate_preview_url(s["model"], rendered, gen_refs, aspect)
     except Exception as e:
         return jsonify({"error": f"模型调用失败: {e}"}), 502
-
-    prefix = ENV.get("OSS_PREFIX", "style-config").rstrip("/")
-    tag = uuid.uuid4().hex[:6]
-    oss_key = f"{prefix}/previews/{style_id}-{tag}.png"
-    url = upload_to_oss(oss_key, png, "image/png")
 
     now = time.time()
     with db_connect() as conn, conn.cursor() as cur:
         cur.execute(
             """UPDATE styles
                SET generated_preview_url=%s, generated_preview_appearance=%s,
+                   generated_preview_ref_urls=%s, generated_preview_aspect=%s,
                    updated_at=%s
                WHERE id=%s
                RETURNING *""",
-            (url, appearance, now, style_id),
+            (url, appearance, Json(uploaded_urls), aspect or None, now, style_id),
         )
         row = cur.fetchone()
         conn.commit()
@@ -506,4 +575,4 @@ if __name__ == "__main__":
     db_init()
     port = int(ENV.get("PORT", "5050"))
     print(f"[style_config] http://localhost:{port}")
-    app.run(host="127.0.0.1", port=port, debug=True)
+    app.run(host="127.0.0.1", port=port, debug=True, threaded=True)

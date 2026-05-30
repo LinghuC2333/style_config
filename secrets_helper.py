@@ -32,6 +32,7 @@ SENSITIVE = frozenset({
     "OSS_ACCESS_KEY_ID",
     "OSS_ACCESS_KEY_SECRET",
     "ZENMUX_API_KEY",
+    "MOB_AI_KEY",  # image-generation router virtual key
     "SSH_PASSWORD",
     "PG_PASSWORD",
     "STYLE_CONFIG_TOKEN",  # shared bearer token for the public deployment
