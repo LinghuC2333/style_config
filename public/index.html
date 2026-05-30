@@ -836,6 +836,14 @@ async function authedFetch(url, opts = {}) {
   }
   return r;
 }
+async function jsonResponse(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`HTTP ${r.status}: 服务返回了无法解析的响应`);
+  }
+}
 function showAuthError() {
   let banner = document.getElementById('authBanner');
   if (banner) return;
@@ -879,6 +887,7 @@ let editPicked = [];
 let genPicked = [];
 let editingId = null;
 let genTargetId = null;
+const previewTasks = new Map();
 
 // ─── helpers ──────────────────────────────────────────────────────────
 function escapeHtml(s) {
@@ -1182,25 +1191,32 @@ genSubmit.onclick = async () => {
   if (!genTargetId) return;
   const text = genAppearance.value.trim();
   if (!text) { showToast('请输入替换文本'); return; }
-  genSubmit.disabled = true; genSubmit.textContent = '生成中…(可能 1-2 分钟)';
+  const styleId = genTargetId;
+  if (previewTasks.has(styleId)) { showToast('这条风格正在生成中'); return; }
+  const fd = new FormData();
+  fd.append('appearance', text);
+  fd.append('aspectRatio', genAspect.value || '');
+  genPicked.forEach(f => fd.append('references', f));  // order preserved
+
+  previewTasks.set(styleId, true);
+  closeScrim('genScrim');
+  genTargetId = null;
+  load().catch(err => showToast(err.message, 4000));
+  showToast('已开始生成，可继续提交其他风格', 2600);
+
   try {
-    const fd = new FormData();
-    fd.append('appearance', text);
-    fd.append('aspectRatio', genAspect.value || '');
-    genPicked.forEach(f => fd.append('references', f));  // order preserved
-    const r = await authedFetch(`/api/styles/${genTargetId}/preview`, {
+    const r = await authedFetch(`/api/styles/${styleId}/preview`, {
       method: 'POST',
       body: fd,
     });
-    const j = await r.json();
+    const j = await jsonResponse(r);
     if (!r.ok) { showToast(j.error || ('HTTP ' + r.status), 4000); return; }
-    closeScrim('genScrim');
-    await load();
     showToast('已生成预览图');
   } catch (err) {
     showToast(err.message, 4000);
   } finally {
-    genSubmit.disabled = false; genSubmit.textContent = '生成';
+    previewTasks.delete(styleId);
+    load().catch(err => showToast(err.message, 4000));
   }
 };
 
@@ -1221,6 +1237,7 @@ async function load() {
 
 function row(s) {
   const el = document.createElement('tr');
+  const isGenerating = previewTasks.has(s.id);
 
   const refs = s.reference_urls || [];
   const refThumb = refs.length
@@ -1235,7 +1252,13 @@ function row(s) {
                  <span class="material-symbols-rounded">content_copy</span>
                </button>
              </div>`).join('');
-  const genCell = s.generated_preview_url
+  const genCell = isGenerating
+    ? `<div class="gen-cell">
+         <button class="btn btn--tonal btn--small" disabled>
+           <span class="material-symbols-rounded">hourglass_top</span>生成中…
+         </button>
+       </div>`
+    : s.generated_preview_url
     ? `<div class="gen-cell">
          <span class="thumb-wrap">
            <img class="thumb" src="${escapeHtml(thumbUrl(s.generated_preview_url))}" alt="" loading="lazy" data-zoom="${escapeHtml(s.generated_preview_url)}">

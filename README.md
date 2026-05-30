@@ -72,7 +72,9 @@ PORT=5050
 3. 后端调 Mob AI 路由 `POST /v1/generations`：model 映射成 `image-gpt` 等，参考图按 URL 传，比例走 `input.aspectRatio`
 4. 路由返回图片 URL（已托管在 OSS），直接写回 DB；这次上传的参考图 URL 存进 `generated_preview_ref_urls`，比例存进 `generated_preview_aspect`
 
-预览图会持久化，以后打开还在；点「重生成」覆盖。注意：出图同步等待、约 1–2 分钟；`aspectRatio` 只有 image-gpt 生效，gemini 会忽略。
+预览图会持久化，以后打开还在；点「重生成」覆盖。提交生成后弹窗会立即关闭，
+对应风格显示「生成中…」，期间仍可继续提交其他风格并发生成。注意：单张出图约
+1–2 分钟；`aspectRatio` 只有 image-gpt 生效，gemini 会忽略。
 
 ## DB schema
 
@@ -207,7 +209,7 @@ STYLE_CONFIG_TOKEN
 
 - 鉴权用 bearer / magic-link（`STYLE_CONFIG_TOKEN`，存 keychain）；不设 token 则鉴权关闭（纯本地时可以这样）
 - 删除只清 DB row，OSS 上的图不删（方便排查 + 省事）
-- 预览生成是同步的，POST 期间会等约 1–2 分钟（Flask 开了 threaded，其他请求不被卡）
+- 预览生成接口是同步的，单个 POST 会等约 1–2 分钟；前端会并发提交不同风格的任务
 - 远端 PG 和本地 PG 不会自动同步，是两套独立库
 - 移动端 hover 没法触发 tooltip，但点缩略图开大图能用
 
