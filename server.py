@@ -439,9 +439,11 @@ def create_style():
 
 @app.route("/api/styles/<style_id>", methods=["PUT"])
 def edit_style(style_id: str):
-    """Edit a style. All fields optional. If `references` is supplied it
-    *replaces* the existing list (1-2 files). Existing OSS objects are not
-    deleted (cheap, easier to debug)."""
+    """Edit a style. Reference updates support two modes:
+    - legacy: uploaded `references` replace the existing list
+    - explicit: `references_mode=replace` saves retained old URLs plus uploads
+      (including an empty list, which clears all references)
+    Existing OSS objects are not deleted (cheap, easier to debug)."""
     with db_connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM styles WHERE id=%s", (style_id,))
         existing = cur.fetchone()
@@ -453,6 +455,8 @@ def edit_style(style_id: str):
     model = (request.form.get("model") or "").strip()
     prompt = (request.form.get("prompt") or "").strip()
     files = [f for f in request.files.getlist("references") if f and f.filename]
+    references_mode = (request.form.get("references_mode") or "").strip()
+    retained_urls = request.form.getlist("retained_references")
 
     field_errors: dict[str, str] = {}
     if not name:
@@ -463,15 +467,26 @@ def edit_style(style_id: str):
         field_errors["model"] = "模型不合法"
     if not prompt:
         field_errors["prompt"] = "请输入风格提示词"
-    if files and len(files) > 2:
+    existing_ref_urls = list(existing["reference_urls"] or [])
+    if references_mode == "replace":
+        if len(retained_urls) != len(set(retained_urls)):
+            field_errors["references"] = "保留的参考图不能重复"
+        elif any(url not in existing_ref_urls for url in retained_urls):
+            field_errors["references"] = "包含不合法的已有参考图"
+        elif len(retained_urls) + len(files) > 2:
+            field_errors["references"] = "参考图总数最多 2 张"
+    elif files and len(files) > 2:
         field_errors["references"] = "最多 2 张参考图"
     if field_errors:
         return jsonify({"field_errors": field_errors}), 400
 
-    ref_urls = list(existing["reference_urls"] or [])
+    ref_urls = existing_ref_urls
+    if references_mode == "replace":
+        ref_urls = retained_urls
     if files:
         prefix = ENV.get("OSS_PREFIX", "style-config").rstrip("/")
-        ref_urls = []
+        if references_mode != "replace":
+            ref_urls = []
         for i, fileobj in enumerate(files, start=1):
             data = fileobj.read()
             # Add a short suffix so we never clobber a URL that the

@@ -503,6 +503,7 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
 
 /* current refs preview inside drawer */
 .drawer-refs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.drawer-ref { position: relative; display: inline-flex; }
 .drawer-refs img {
   width: 64px; height: 64px;
   object-fit: cover;
@@ -510,6 +511,22 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
   border: 1px solid var(--outline-variant);
   cursor: zoom-in;
 }
+.drawer-ref__remove {
+  position: absolute;
+  top: -7px; right: -7px;
+  width: 22px; height: 22px;
+  padding: 0;
+  border: 1px solid var(--outline-variant);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--error);
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: var(--shadow-1);
+}
+.drawer-ref__remove .material-symbols-rounded { font-size: 16px; }
+.drawer-ref__remove:hover { background: var(--error-container); }
+.drawer-refs__empty { color: var(--on-surface-mute); font-size: 14px; line-height: 32px; }
 
 /* lightbox */
 .lightbox {
@@ -728,7 +745,7 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
         <span class="field__support" data-support>用 <code>{{变量名}}</code> 占位（如 {{appearance}}）</span>
       </div>
 
-      <div class="drawer__section-label">当前参考图</div>
+      <div class="drawer__section-label">当前参考图（点击图片预览，右上角可移除）</div>
       <div class="drawer-refs" id="editCurrentRefs"></div>
 
       <div class="field field--file" data-field="references">
@@ -737,8 +754,8 @@ main { padding: 32px; max-width: 1600px; margin: 0 auto; }
           <span class="file-list" id="editFileList"></span>
         </label>
         <input id="editRefs" name="references" type="file" accept="image/*" multiple>
-        <label class="field__label">替换参考图（可选）</label>
-        <span class="field__support" data-support>不选则保留原有参考图。最多 2 张</span>
+        <label class="field__label">添加参考图（可选）</label>
+        <span class="field__support" data-support>与上方保留的图片合计最多 2 张；保存后更新风格引用</span>
       </div>
     </form>
   </div>
@@ -884,6 +901,7 @@ const toast = $('toast');
 
 let createPicked = [];
 let editPicked = [];
+let editRetainedRefs = [];
 let genPicked = [];
 let editingId = null;
 let genTargetId = null;
@@ -1122,12 +1140,32 @@ async function openEdit(style) {
   editForm.prompt.value = style.prompt || '';
   syncSelectsEmpty(editForm);
   editIdEl.textContent = style.id;
-  editCurrentRefs.innerHTML = (style.reference_urls || [])
-    .map(u => `<a href="#" data-url="${escapeHtml(u)}"><img src="${escapeHtml(thumbUrl(u))}" alt="" loading="lazy"></a>`).join('');
+  editRetainedRefs = [...(style.reference_urls || [])];
+  renderEditCurrentRefs();
+  openDrawer();
+}
+
+function renderEditCurrentRefs() {
+  if (editRetainedRefs.length === 0) {
+    editCurrentRefs.innerHTML = '<span class="drawer-refs__empty">当前没有参考图</span>';
+    return;
+  }
+  editCurrentRefs.innerHTML = editRetainedRefs.map((u, i) => `
+    <span class="drawer-ref">
+      <a href="#" data-url="${escapeHtml(u)}"><img src="${escapeHtml(thumbUrl(u))}" alt="" loading="lazy"></a>
+      <button type="button" class="drawer-ref__remove" data-remove-ref="${i}" aria-label="移除参考图 ${i + 1}">
+        <span class="material-symbols-rounded">close</span>
+      </button>
+    </span>`).join('');
   editCurrentRefs.querySelectorAll('a').forEach(a => {
     a.onclick = (e) => { e.preventDefault(); openLightbox(a.dataset.url); };
   });
-  openDrawer();
+  editCurrentRefs.querySelectorAll('[data-remove-ref]').forEach(btn => {
+    btn.onclick = () => {
+      editRetainedRefs.splice(Number(btn.dataset.removeRef), 1);
+      renderEditCurrentRefs();
+    };
+  });
 }
 
 editSubmit.onclick = async () => {
@@ -1138,6 +1176,8 @@ editSubmit.onclick = async () => {
   fd.append('category', editForm.category.value);
   fd.append('model', editForm.model.value);
   fd.append('prompt', editForm.prompt.value.trim());
+  fd.append('references_mode', 'replace');
+  editRetainedRefs.forEach(u => fd.append('retained_references', u));
   editPicked.slice(0, 2).forEach(f => fd.append('references', f));
 
   const errs = {};
@@ -1145,7 +1185,7 @@ editSubmit.onclick = async () => {
   if (!editForm.category.value) errs.category = '请选择类别';
   if (!editForm.model.value) errs.model = '请选择模型';
   if (!editForm.prompt.value.trim()) errs.prompt = '请输入风格提示词';
-  if (editPicked.length > 2) errs.references = '最多 2 张参考图';
+  if (editRetainedRefs.length + editPicked.length > 2) errs.references = '参考图总数最多 2 张';
   if (Object.keys(errs).length) {
     Object.entries(errs).forEach(([k, v]) => setError(editForm, k, v));
     return;

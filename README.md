@@ -52,7 +52,7 @@ PORT=5050
 - `id` / `style_name` / `type` / `model` / `prompt`（单行，超出省略号）
 - `ref_preview`：参考图 64×64 缩略图。鼠标悬上去会弹出 URL + 复制按钮，点图本身开大图
 - `generated_preview`：默认空，旁边有「生成」按钮。点开后填替换文本（替换 prompt 里任意 `{{变量}}`）、可选上传任意多张参考图（按上传顺序）、可选挑输出比例（如 9:16），后端调模型出图、URL 写回 DB，缩略图回到这一格。悬停能看到出图 URL + 这次上传的参考图 URL
-- 「编辑」按钮：右侧滑出抽屉，改名 / 改 prompt / 换参考图都在这里
+- 「编辑」按钮：右侧滑出抽屉，改名 / 改 prompt / 增删换参考图都在这里
 
 ## 类别 / 模型枚举
 
@@ -112,9 +112,16 @@ curl -X POST localhost:5050/api/styles \
   -F prompt='现代 YA 图像小说风格, ... {{appearance}}' \
   -F references=@/path/to/ref.png
 
-# 编辑（references 不传就保留旧的）
+# 编辑（兼容旧用法：references 不传就保留旧的；上传则替换旧图）
 curl -X PUT localhost:5050/api/styles/<id> \
   -F name="新名字" -F category=... -F model=... -F prompt=...
+
+# 编辑参考图列表（新版后台使用：保留指定旧图，可追加新图；不保留也不上传就是清空）
+curl -X PUT localhost:5050/api/styles/<id> \
+  -F name="新名字" -F category=... -F model=... -F prompt=... \
+  -F references_mode=replace \
+  -F retained_references="https://.../keep-this-ref.png" \
+  -F references=@/path/to/new-ref.png
 
 # 生成预览（multipart：appearance 必填；aspectRatio / references 可选，references 不限张数）
 curl -X POST localhost:5050/api/styles/<id>/preview \
