@@ -143,8 +143,9 @@ curl -X DELETE localhost:5050/api/styles/<id>
 - 本地 MCP server 用 SSH 隧道连远端，给 Claude 暴露 6 个 tool（list / get / create / update / delete / set_generated_preview）
 
 ```bash
-pip install mcp 'psycopg[binary]' sshtunnel 'paramiko<4.0'
-# 编辑 mcp/.env 填 SSH + PG 密码
+pip install mcp 'psycopg[binary]' sshtunnel 'paramiko<4.0' keyring
+cp mcp/.env.example mcp/.env
+# 编辑 mcp/.env 填非敏感连接参数。密码用系统钥匙串或环境变量单独配置。
 # 注册到 Claude Code：
 claude mcp add style_config --scope user -- python3 $(pwd)/mcp/style_config_mcp.py
 ```
@@ -153,6 +154,8 @@ claude mcp add style_config --scope user -- python3 $(pwd)/mcp/style_config_mcp.
 
 - MCP 只管 DB，不管 OSS。`create_style` / `update_style` 收的是已经在 OSS 上的 URL；
   上传图还是用 web 后台的接口
+- 推荐在 `mcp/.env` 里配置 `SSH_KEY_PATH` 使用 SSH key。没有 SSH key 时，
+  把 `SSH_PASSWORD` 和 `PG_PASSWORD` 放进系统钥匙串或启动 MCP 的环境变量，不要写入 `.env`
 - `paramiko<4.0` 的限制是因为 `sshtunnel 0.4.0` 还引用了 4.0 移除的 `DSSKey`
 - 远端 PG 建库 / 建 role 的 SQL 在 git 历史里能找到，没单独写脚本
 
