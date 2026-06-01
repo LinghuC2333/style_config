@@ -906,6 +906,8 @@ let genPicked = [];
 let editingId = null;
 let genTargetId = null;
 const previewTasks = new Map();
+let stylesCache = [];
+let loadSequence = 0;
 
 // ─── helpers ──────────────────────────────────────────────────────────
 function escapeHtml(s) {
@@ -1241,7 +1243,7 @@ genSubmit.onclick = async () => {
   previewTasks.set(styleId, true);
   closeScrim('genScrim');
   genTargetId = null;
-  load().catch(err => showToast(err.message, 4000));
+  renderStyles();
   showToast('已开始生成，可继续提交其他风格', 2600);
 
   try {
@@ -1256,14 +1258,22 @@ genSubmit.onclick = async () => {
     showToast(err.message, 4000);
   } finally {
     previewTasks.delete(styleId);
+    renderStyles();
     load().catch(err => showToast(err.message, 4000));
   }
 };
 
 // ─── list / render ───────────────────────────────────────────────────
 async function load() {
+  const sequence = ++loadSequence;
   const r = await authedFetch('/api/styles');
   const items = await r.json();
+  if (sequence !== loadSequence) return;
+  renderStyles(items);
+}
+
+function renderStyles(items = stylesCache) {
+  stylesCache = items;
   tableBody.innerHTML = '';
   if (items.length === 0) {
     tableEl.style.display = 'none';
